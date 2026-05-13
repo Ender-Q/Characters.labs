@@ -1,0 +1,9 @@
+{
+  "build": {
+    "builder": "NIXPKGS",
+    "buildCommand": "npm install && cd server && npm install && echo \"Server installed\" && ls -la node_modules/express && cd ../client_new && npm install && echo \"Client installed\" && ls -la node_modules && npm run build && echo \"Client built\" && ls -la dist
+  },
+  "deploy": {
+    "restartCommand": "cd server && npm start
+  }
+}
