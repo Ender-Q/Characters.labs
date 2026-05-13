@@ -1,0 +1,19 @@
+{
+  "name": "character-labs",
+  "version": "1.0.0",
+  "description": "Open-source AI character chat application",
+  "main": "server/index.js",
+  "scripts": {
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "server": "cd server && npm run dev",
+    "client": "cd client_new && npm run dev",
+    "build": "cd client_new && npm run build",
+    "start": "cd server && npm start"
+  },
+  "keywords": ["ai", "chat", "character", "llm"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
