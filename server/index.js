@@ -116,9 +116,17 @@ db.serialize(() => {
     model_type TEXT DEFAULT 'softlaunch',
     message_count INTEGER DEFAULT 0,
     emotional_intensity REAL DEFAULT 0,
+    summary TEXT DEFAULT '',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (character_id) REFERENCES characters (id)
   )`);
+
+  // Add summary column if it doesn't exist (for existing databases)
+  db.run(`ALTER TABLE conversations ADD COLUMN summary TEXT DEFAULT ''`, (err) => {
+    if (err && !err.message.includes('duplicate column') && !err.message.includes('already exists')) {
+      console.error('Error adding summary column:', err);
+    }
+  });
 });
 
 class AIService {
@@ -141,7 +149,35 @@ class AIService {
     return { safe: true };
   }
 
-  static async generateResponse(character, message, conversationHistory, modelType = 'softlaunch') {
+  static async generateSummary(conversationHistory) {
+    // For now, we'll create a simple summary based on recent messages
+    // In a production app, you might want to use an AI model to generate better summaries
+    if (conversationHistory.length === 0) return '';
+    
+    // Take the last few messages to create a summary
+    const recentMessages = conversationHistory.slice(-10);
+    let summary = 'Recent conversation topics: ';
+    
+    // Extract key topics (simplified)
+    const topics = [];
+    recentMessages.forEach(msg => {
+      const content = msg.content.toLowerCase();
+      // Simple keyword extraction
+      if (content.includes('love') || content.includes('like') || content.includes('enjoy')) topics.push('positive emotions');
+      if (content.includes('hate') || content.includes('dislike') || content.includes('angry')) topics.push('negative emotions');
+      if (content.includes('work') || content.includes('job') || content.includes('career')) topics.push('work/career');
+      if (content.includes('family') || content.includes('friend') || content.includes('relationship')) topics.push('relationships');
+      if (content.includes('hobby') || content.includes('game') || content.includes('fun')) topics.push('hobbies/interests');
+    });
+    
+    // Deduplicate and limit topics
+    const uniqueTopics = [...new Set(topics)].slice(0, 3);
+    summary += uniqueTopics.join(', ');
+    
+    return summary;
+  }
+
+  static async generateResponse(character, message, conversationHistory, modelType = 'softlaunch', summary = '') {
     const contentCheck = this.checkContent(message);
     if (!contentCheck.safe) {
       return {
@@ -163,11 +199,11 @@ class AIService {
       apiUrl = `${apiUrl}/models/${modelConfig.model}:generateContent?key=${apiKey}`;
       headers = { 'Content-Type': 'application/json' };
       
-      const allMessages = [
-        { role: 'user', parts: [{ text: 'System: ' + 'You are ' + character.name + '. ' + character.description + '\n\nPersonality: ' + character.personality + '\n\nIMPORTANT: Stay in character, never mention being AI, never break character.' }] },
-        ...conversationHistory.slice(-20).map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] })),
-        { role: 'user', parts: [{ text: message }] }
-      ];
+       const allMessages = [
+         { role: 'user', parts: [{ text: 'System: ' + 'You are ' + character.name + '. ' + character.description + '\n\nPersonality: ' + character.personality + '\n\nIMPORTANT: Stay in character, never mention being AI, never break character.' + (summary ? '\n\nSummary of past conversations: ' + summary : '') }] },
+         ...conversationHistory.slice(-20).map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] })),
+         { role: 'user', parts: [{ text: message }] }
+       ];
       
       body = JSON.stringify({
         contents: allMessages,
@@ -185,10 +221,11 @@ class AIService {
         ? `\n\nLOREBOOK: ${lorebook.map(entry => `${entry.key}: ${entry.value}`).join('\n')}`
         : '';
 
-      const systemPrompt = `You are ${character.name}. ${character.description}${loreContext}
-Personality: ${character.personality}
-IMPORTANT: Stay in character, never mention being AI, never break character.
-Greeting: ${character.greeting}`;
+       const systemPrompt = `You are ${character.name}. ${character.description}${loreContext}
+ Personality: ${character.personality}
+ IMPORTANT: Stay in character, never mention being AI, never break character.
+ Greeting: ${character.greeting}
+ Summary of past conversations: ${summary}`;
 
       const messages = [
         { role: "system", content: systemPrompt },
@@ -434,7 +471,8 @@ io.on('connection', (socket) => {
             if (intervention) {
               finalResponse = intervention.message;
             } else {
-              const aiResult = await AIService.generateResponse(character, message, history, modelType);
+              // Pass conversation history and existing summary to generateResponse
+              const aiResult = await AIService.generateResponse(character, message, history, modelType, conversation.summary || '');
               finalResponse = aiResult.content;
             }
             
@@ -444,17 +482,20 @@ io.on('connection', (socket) => {
               { role: "assistant", content: finalResponse, timestamp: new Date().toISOString(), model: MODELS[modelType]?.name || 'Soft Launch' }
             ];
 
+            // Generate summary for permanent memory
+            const summary = await AIService.generateSummary(newHistory);
+
             let newConversationId = conversationId;
             
             if (conversationId) {
               db.run(
-                "UPDATE conversations SET messages = ?, message_count = ? WHERE id = ?",
-                [JSON.stringify(newHistory), newHistory.length, conversationId]
+                "UPDATE conversations SET messages = ?, message_count = ?, summary = ? WHERE id = ?",
+                [JSON.stringify(newHistory), newHistory.length, summary, conversationId]
               );
             } else {
               db.run(
-                "INSERT INTO conversations (character_id, user_id, messages, model_type, message_count) VALUES (?, ?, ?, ?, ?)",
-                [characterId, socket.id, JSON.stringify(newHistory), modelType, newHistory.length],
+                "INSERT INTO conversations (character_id, user_id, messages, model_type, message_count, summary) VALUES (?, ?, ?, ?, ?, ?)",
+                [characterId, socket.id, JSON.stringify(newHistory), modelType, newHistory.length, summary],
                 function(err) {
                   if (!err) {
                     newConversationId = this.lastID;
