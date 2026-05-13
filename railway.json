@@ -1,9 +1,9 @@
 {
   "build": {
     "builder": "NIXPKGS",
-    "buildCommand": "cd client_new && npm install && npm run build"
+    "buildCommand": "cd server && npm install && cd ../client_new && npm install && npm run build"
   },
   "deploy": {
-    "restartCommand": "cd server && npm install && npm start"
+    "restartCommand": "cd server && npm start"
   }
 }
