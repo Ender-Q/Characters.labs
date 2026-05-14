@@ -4,6 +4,6 @@
     "buildCommand": "cd server && npm install && cd ../client_new && npm install && npm run build"
   },
   "deploy": {
-    "restartCommand": "cd server && NODE_ENV=production npm start"
+    "startCommand": "cd server && NODE_ENV=production npm start"
   }
 }
