@@ -9,7 +9,7 @@ const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
-    origin: "http://localhost:3000",
+    origin: process.env.NODE_ENV === 'production' ? '*' : "http://localhost:3000",
     methods: ["GET", "POST"]
   }
 });
@@ -387,6 +387,14 @@ app.get('/api/conversations/:characterId/:userId', (req, res) => {
     }
   );
 });
+
+// Serve client build in production
+if (process.env.NODE_ENV === 'production') {
+  app.use(express.static(path.join(__dirname, '..', 'client_new', 'dist')));
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(__dirname, '..', 'client_new', 'dist', 'index.html'));
+  });
+}
 
 const userSessions = new Map();
 
