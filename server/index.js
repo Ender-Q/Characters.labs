@@ -480,7 +480,7 @@ io.on('connection', (socket) => {
               finalResponse = intervention.message;
             } else {
               // Pass conversation history and existing summary to generateResponse
-              const aiResult = await AIService.generateResponse(character, message, history, modelType, conversation.summary || '');
+              const aiResult = await AIService.generateResponse(character, message, history, modelType, conversation ? (conversation.summary || '') : '');
               finalResponse = aiResult.content;
             }
             
