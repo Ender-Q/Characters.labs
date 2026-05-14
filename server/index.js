@@ -663,36 +663,34 @@ io.on('connection', (socket) => {
               { role: "assistant", content: finalResponse, timestamp: new Date().toISOString(), model: MODELS[modelType]?.name || 'Soft Launch' }
             ];
 
-            let newConversationId = conversationId;
-
             const summary = await memoryStore.generateComprehensiveSummary(conversationId || 0);
             const finalSummary = summary || '';
+
+            const emitResponse = (id) => {
+              memoryStore.store(id, socket.id, characterId, 'user', message);
+              memoryStore.store(id, socket.id, characterId, 'assistant', finalResponse);
+              socket.emit('ai-response', {
+                message: finalResponse,
+                conversationId: id,
+                intervention: intervention ? true : false
+              });
+            };
 
             if (conversationId) {
               db.run(
                 "UPDATE conversations SET messages = ?, message_count = ?, summary = ? WHERE id = ?",
-                [JSON.stringify(newHistory), newHistory.length, finalSummary, conversationId]
+                [JSON.stringify(newHistory), newHistory.length, finalSummary, conversationId],
+                () => emitResponse(conversationId)
               );
             } else {
               db.run(
                 "INSERT INTO conversations (character_id, user_id, messages, model_type, message_count, summary) VALUES (?, ?, ?, ?, ?, ?)",
                 [characterId, socket.id, JSON.stringify(newHistory), modelType, newHistory.length, finalSummary],
                 function(err) {
-                  if (!err) {
-                    newConversationId = this.lastID;
-                  }
+                  emitResponse(err ? null : this.lastID);
                 }
               );
             }
-
-            memoryStore.store(newConversationId, socket.id, characterId, 'user', message);
-            memoryStore.store(newConversationId, socket.id, characterId, 'assistant', finalResponse);
-
-            socket.emit('ai-response', {
-              message: finalResponse,
-              conversationId: newConversationId,
-              intervention: intervention ? true : false
-            });
           }
         );
       });
