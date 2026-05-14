@@ -13,6 +13,7 @@
   "keywords": ["ai", "chat", "character", "llm"],
   "author": "",
   "license": "MIT",
+  "workspaces": ["server", "client_new"],
   "devDependencies": {
     "concurrently": "^8.2.2"
   }
