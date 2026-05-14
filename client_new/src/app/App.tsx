@@ -69,6 +69,20 @@ export default function App() {
       setIsTyping(false);
     });
 
+    newSocket.on('model-switched', (data) => {
+      setConversationId(data.conversationId);
+      if (data.messages && data.messages.length > 0) {
+        const loaded = data.messages.map((m: any, i: number) => ({
+          id: `msg-${i}`,
+          message: m.content,
+          isUser: m.role === 'user',
+          timestamp: m.timestamp ? new Date(m.timestamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }),
+          model: m.model
+        }));
+        setMessages(loaded);
+      }
+    });
+
     return () => newSocket.close();
   }, []);
 
@@ -126,6 +140,17 @@ export default function App() {
         timestamp: new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }),
         model: MODELS[currentModel]?.name
       }]);
+    }
+  };
+
+  const handleModelChange = (model: string) => {
+    setCurrentModel(model);
+    if (socket && conversationId && selectedCharacter) {
+      socket.emit('switch-model', {
+        conversationId,
+        modelType: model,
+        characterId: selectedCharacter.id
+      });
     }
   };
 
@@ -323,7 +348,7 @@ export default function App() {
                     <span className="text-sm text-gray-500">Model:</span>
                     <ModelSelector
                       currentModel={currentModel}
-                      onModelChange={setCurrentModel}
+                      onModelChange={handleModelChange}
                       disabled={isTyping}
                     />
                   </div>

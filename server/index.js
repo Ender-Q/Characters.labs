@@ -335,7 +335,7 @@ const memoryStore = new MemoryStore(db);
 
 // ===== AI Service =====
 class AIService {
-  static async generateResponse(character, message, conversationHistory, modelType = 'softlaunch', memories = []) {
+  static async generateResponse(character, message, conversationHistory, modelType = 'softlaunch', memories = [], summary = '') {
     const modelConfig = MODELS[modelType] || MODELS.softlaunch;
     const apiKey = modelConfig.provider === 'google'
       ? process.env.GOOGLE_API_KEY
@@ -351,16 +351,18 @@ class AIService {
     let apiUrl = modelConfig.apiUrl;
     let body, headers;
 
+    const summaryContext = summary ? `\n\nConversation summary: ${summary}` : '';
     const memoryContext = memories.length > 0
       ? '\n\nRelevant past memories:\n' + memories.map(m => `- ${m.role === 'user' ? 'User' : m.role === 'assistant' ? 'Character' : 'System'} said: "${m.content.slice(0, 300)}"`).join('\n')
       : '';
+    const fullContext = summaryContext + memoryContext;
 
     if (modelConfig.provider === 'google') {
       apiUrl = `${apiUrl}/models/${modelConfig.model}:generateContent?key=${apiKey}`;
       headers = { 'Content-Type': 'application/json' };
 
       const allMessages = [
-        { role: 'user', parts: [{ text: 'System: ' + 'You are ' + character.name + '. ' + character.description + '\n\nPersonality: ' + character.personality + '\n\nIMPORTANT: Stay in character, never mention being AI, never break character.' + memoryContext }] },
+        { role: 'user', parts: [{ text: 'System: ' + 'You are ' + character.name + '. ' + character.description + '\n\nPersonality: ' + character.personality + '\n\nIMPORTANT: Stay in character, never mention being AI, never break character.' + fullContext }] },
         ...conversationHistory.slice(-20).map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] })),
         { role: 'user', parts: [{ text: message }] }
       ];
@@ -384,8 +386,7 @@ class AIService {
       const systemPrompt = `You are ${character.name}. ${character.description}${loreContext}
 Personality: ${character.personality}
 IMPORTANT: Stay in character, never mention being AI, never break character.
-Greeting: ${character.greeting}
-${memoryContext}`;
+Greeting: ${character.greeting}${fullContext}`;
 
       const messages = [
         { role: "system", content: systemPrompt },
@@ -646,12 +647,13 @@ io.on('connection', (socket) => {
             const intervention = session.checkEscalation(message);
 
             const memories = await memoryStore.retrieve(message, socket.id, characterId);
+            const existingSummary = conversation ? (conversation.summary || '') : '';
 
             let finalResponse;
             if (intervention) {
               finalResponse = intervention.message;
             } else {
-              const aiResult = await AIService.generateResponse(character, message, history, modelType, memories);
+              const aiResult = await AIService.generateResponse(character, message, history, modelType, memories, existingSummary);
               finalResponse = aiResult.content;
             }
 
@@ -700,13 +702,28 @@ io.on('connection', (socket) => {
   });
 
   socket.on('switch-model', async (data) => {
-    const { conversationId, modelType } = data;
-    if (MODELS[modelType]) {
+    const { conversationId, modelType, characterId } = data;
+    if (MODELS[modelType] && conversationId) {
       db.run("UPDATE conversations SET model_type = ? WHERE id = ?", [modelType, conversationId]);
 
       const summary = await memoryStore.generateComprehensiveSummary(conversationId);
       if (summary) {
         db.run("UPDATE conversations SET summary = ? WHERE id = ?", [summary, conversationId]);
+      }
+
+      const row = await new Promise((resolve, reject) => {
+        db.get("SELECT * FROM conversations WHERE id = ?", [conversationId], (err, row) => {
+          if (err) reject(err); else resolve(row);
+        });
+      });
+
+      if (row) {
+        socket.emit('model-switched', {
+          modelType,
+          conversationId,
+          messages: JSON.parse(row.messages || '[]'),
+          summary: row.summary || ''
+        });
       }
     }
   });
