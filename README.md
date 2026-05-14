@@ -7,7 +7,7 @@
 [![React Version](https://img.shields.io/badge/react-18-blue)](https://reactjs.org/)
 [![Socket.io](https://img.shields.io/badge/Socket.IO-%23010101?logo=socket.io)](https://socket.io/)
 
-## 🚀 An open-source AI character chat application similar to Character.AI, built with React, Node.js, and powered by open-source AI models. Free forever, no paywalls.
+## 🚀 An open-source AI character chat application similar to Character.AI, built with React, Node.js, and powered by open-source AI models. Free forever, no paywalls(and README.md images😭).
 
 ## ✨ Features
 
