@@ -1,9 +1,10 @@
-import { useState, useEffect, useRef } from 'react';
-import { Github, Send, Menu, Plus, Search, Sparkles, Code2, X } from 'lucide-react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { Github, Send, Menu, Plus, Search, Sparkles, Code2, X, Rewind, Clock } from 'lucide-react';
 import { CharacterCard } from './components/CharacterCard';
 import { ChatMessage } from './components/ChatMessage';
 import { CharacterProfile } from './components/CharacterProfile';
 import { ModelSelector } from './components/ModelSelector';
+import { CharacterCreator } from './components/CharacterCreator';
 import io from 'socket.io-client';
 
 const API_URL = '';
@@ -44,8 +45,7 @@ export default function App() {
   const [socket, setSocket] = useState<ReturnType<typeof io> | null>(null);
   const [conversationId, setConversationId] = useState<number | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [createForm, setCreateForm] = useState({ name: '', description: '', greeting: '', avatar_url: '' });
-  const [creating, setCreating] = useState(false);
+  const [showRewind, setShowRewind] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -154,42 +154,56 @@ export default function App() {
     }
   };
 
+  const saveToRewind = useCallback((character: Character, msgs: typeof messages, convId: number | null, model: string) => {
+    if (!character || msgs.length === 0) return;
+    const preview = msgs.slice(-2).map(m => `${m.isUser ? 'You' : character.name}: ${m.message.slice(0, 80)}`).join('\n');
+    const entry = {
+      id: Date.now().toString(),
+      characterName: character.name,
+      characterId: character.id,
+      character,
+      messages: msgs,
+      conversationId: convId,
+      modelType: model,
+      timestamp: new Date().toISOString(),
+      preview
+    };
+    try {
+      const stored = JSON.parse(localStorage.getItem('rewind_chats') || '[]');
+      const existing = stored.findIndex((s: any) => s.conversationId === convId && s.characterId === character.id);
+      if (existing >= 0) stored[existing] = entry;
+      else stored.unshift(entry);
+      localStorage.setItem('rewind_chats', JSON.stringify(stored.slice(0, 50)));
+    } catch {}
+  }, []);
+
+  const loadFromRewind = (chat: any) => {
+    const char = characters.find(c => c.id === chat.characterId) || chat.character;
+    if (char) {
+      setSelectedCharacter(char);
+      setMessages(chat.messages || []);
+      setConversationId(chat.conversationId);
+      setCurrentModel(chat.modelType || 'softlaunch');
+      setShowRewind(false);
+    }
+  };
+
+  useEffect(() => {
+    if (selectedCharacter && messages.length > 0) {
+      saveToRewind(selectedCharacter, messages, conversationId, currentModel);
+    }
+  }, [messages, selectedCharacter, conversationId, currentModel, saveToRewind]);
+
+  const onCharacterCreated = (char: Character) => {
+    setCharacters(prev => [char, ...prev]);
+    handleCharacterSelect(char);
+  };
+
   const handleNewChat = () => {
     setSelectedCharacter(null);
     setMessages([]);
     setConversationId(null);
     setMessage('');
-  };
-
-  const handleCreateCharacter = async () => {
-    if (!createForm.name.trim() || !createForm.description.trim() || !createForm.greeting.trim()) return;
-    
-    setCreating(true);
-    try {
-      const response = await fetch('/api/characters', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: createForm.name,
-          description: createForm.description,
-          greeting: createForm.greeting,
-          avatar_url: createForm.avatar_url,
-          personality: 'friendly and engaging'
-        })
-      });
-      
-      if (response.ok) {
-        const newChar = await response.json();
-        setCharacters(prev => [newChar, ...prev]);
-        setShowCreateModal(false);
-        setCreateForm({ name: '', description: '', greeting: '', avatar_url: '' });
-        handleCharacterSelect(newChar);
-      }
-    } catch (error) {
-      console.error('Error creating character:', error);
-    } finally {
-      setCreating(false);
-    }
   };
 
   const filteredCharacters = characters.filter(char =>
@@ -260,6 +274,37 @@ export default function App() {
               <Sparkles size={16} />
               <span className="font-medium text-sm">Create Character</span>
             </button>
+
+            <button
+              onClick={() => { setShowRewind(!showRewind); }}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-white border border-amber-200 text-amber-700 rounded-xl hover:bg-amber-50 hover:border-amber-300 transition-all mt-2"
+            >
+              <Rewind size={16} />
+              <span className="font-medium text-sm">ReWind</span>
+            </button>
+
+            {showRewind && (
+              <div className="mt-2 bg-white border border-amber-200 rounded-xl overflow-hidden max-h-60 overflow-y-auto shadow-sm">
+                {(() => {
+                  const chats = JSON.parse(localStorage.getItem('rewind_chats') || '[]');
+                  return chats.length === 0 ? (
+                    <p className="text-xs text-gray-400 text-center py-4">No saved chats yet</p>
+                  ) : (
+                    chats.map((chat: any) => (
+                      <button key={chat.id} onClick={() => loadFromRewind(chat)}
+                        className="w-full text-left p-3 border-b border-amber-100 hover:bg-amber-50 transition-colors last:border-b-0">
+                        <div className="flex items-center gap-2">
+                          <Clock size={12} className="text-amber-500 flex-shrink-0" />
+                          <span className="text-xs font-medium text-gray-900">{chat.characterName}</span>
+                          <span className="text-xs text-gray-400 ml-auto">{new Date(chat.timestamp).toLocaleDateString()}</span>
+                        </div>
+                        <p className="text-xs text-gray-500 mt-1 line-clamp-2 whitespace-pre-wrap">{chat.preview}</p>
+                      </button>
+                    ))
+                  );
+                })()}
+              </div>
+            )}
 
             <div className="mt-3 relative">
               <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
@@ -440,83 +485,8 @@ export default function App() {
         </main>
       </div>
 
-      {/* Create Character Modal */}
       {showCreateModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl w-full max-w-lg p-6 shadow-2xl">
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="text-xl font-bold text-gray-900">Create Character</h2>
-              <button 
-                onClick={() => setShowCreateModal(false)}
-                className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
-              >
-                <X size={20} className="text-gray-500" />
-              </button>
-            </div>
-            
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Name *</label>
-                <input
-                  type="text"
-                  value={createForm.name}
-                  onChange={(e) => setCreateForm({...createForm, name: e.target.value})}
-                  className="w-full px-4 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="e.g., Captain Jack Sparrow"
-                />
-              </div>
-              
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Description *</label>
-                <textarea
-                  value={createForm.description}
-                  onChange={(e) => setCreateForm({...createForm, description: e.target.value})}
-                  className="w-full px-4 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
-                  rows={3}
-                  placeholder="A quirky pirate captain who loves adventures..."
-                />
-              </div>
-              
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Greeting *</label>
-                <textarea
-                  value={createForm.greeting}
-                  onChange={(e) => setCreateForm({...createForm, greeting: e.target.value})}
-                  className="w-full px-4 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
-                  rows={2}
-                  placeholder="Ahoy there, matey! What brings ye to my ship?"
-                />
-              </div>
-              
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Avatar URL</label>
-                <input
-                  type="url"
-                  value={createForm.avatar_url}
-                  onChange={(e) => setCreateForm({...createForm, avatar_url: e.target.value})}
-                  className="w-full px-4 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="https://example.com/avatar.jpg"
-                />
-              </div>
-            </div>
-            
-            <div className="flex gap-3 mt-6">
-              <button
-                onClick={() => setShowCreateModal(false)}
-                className="flex-1 px-4 py-2.5 border border-gray-200 text-gray-700 rounded-xl hover:bg-gray-50 transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleCreateCharacter}
-                disabled={creating || !createForm.name.trim() || !createForm.description.trim() || !createForm.greeting.trim()}
-                className="flex-1 px-4 py-2.5 bg-gradient-to-r from-blue-600 to-purple-600 text-white rounded-xl hover:from-blue-700 hover:to-purple-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {creating ? 'Creating...' : 'Create'}
-              </button>
-            </div>
-          </div>
-        </div>
+        <CharacterCreator onClose={() => setShowCreateModal(false)} onCreated={onCharacterCreated} />
       )}
     </div>
   );

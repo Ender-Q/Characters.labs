@@ -4,6 +4,7 @@ const http = require('http');
 const socketIo = require('socket.io');
 require('dotenv').config();
 const path = require('path');
+const mongodb = require('./mongodb');
 
 const app = express();
 const server = http.createServer(app);
@@ -271,7 +272,7 @@ class MemoryStore {
     );
   }
 
-  async retrieve(query, userId, characterId, topK = 5) {
+  async retrieve(query, userId, characterId, topK = 8) {
     const queryEmb = await this._getGoogleEmbedding(query);
     if (!queryEmb) return [];
 
@@ -289,7 +290,7 @@ class MemoryStore {
         role: row.role,
         similarity: this.cosineSimilarity(queryEmb, JSON.parse(row.embedding))
       }))
-      .filter(r => r.similarity > 0.45);
+      .filter(r => r.similarity > 0.35);
 
     scored.sort((a, b) => b.similarity - a.similarity);
     return scored.slice(0, topK);
@@ -309,22 +310,30 @@ class MemoryStore {
     const messages = JSON.parse(row.messages || '[]');
     if (messages.length === 0) return '';
 
-    let summary = `Conversation using ${MODELS[row.model_type]?.name || 'Unknown'} model:\n`;
-    messages.slice(-20).forEach(msg => {
+    const modelName = MODELS[row.model_type]?.name || 'Unknown';
+    const exchangeCount = Math.floor(messages.length / 2);
+    let summary = `Conversation (${exchangeCount} exchanges, using ${modelName}):\n`;
+    messages.slice(-24).forEach(msg => {
       const prefix = msg.role === 'user' ? 'User' : 'Character';
-      summary += `${prefix}: ${msg.content.slice(0, 200)}\n`;
+      summary += `${prefix}: ${msg.content.slice(0, 300)}\n`;
     });
 
-    const topics = [];
     const allContent = messages.map(m => m.content.toLowerCase()).join(' ');
-    if (allContent.includes('love') || allContent.includes('like') || allContent.includes('enjoy')) topics.push('positive emotions');
-    if (allContent.includes('hate') || allContent.includes('angry') || allContent.includes('sad')) topics.push('negative emotions');
-    if (allContent.includes('work') || allContent.includes('job') || allContent.includes('career')) topics.push('work/career');
-    if (allContent.includes('family') || allContent.includes('friend') || allContent.includes('relationship')) topics.push('relationships');
-    if (allContent.includes('hobby') || allContent.includes('game') || allContent.includes('fun')) topics.push('hobbies/interests');
-
+    const topics = [];
+    const topicMap = {
+      'positive emotions': ['love', 'like', 'enjoy', 'happy', 'wonderful', 'amazing', 'great', 'fantastic'],
+      'negative emotions': ['hate', 'angry', 'sad', 'upset', 'depressed', 'lonely', 'scared', 'hurt'],
+      'work/career': ['work', 'job', 'career', 'boss', 'office', 'project', 'promotion', 'salary'],
+      'relationships': ['family', 'friend', 'relationship', 'partner', 'girlfriend', 'boyfriend', 'mother', 'father'],
+      'hobbies/interests': ['hobby', 'game', 'fun', 'music', 'art', 'book', 'movie', 'sport', 'travel', 'cook'],
+      'philosophy': ['meaning', 'purpose', 'life', 'death', 'god', 'universe', 'existence', 'soul'],
+      'daily life': ['today', 'morning', 'night', 'weather', 'food', 'eat', 'sleep', 'home', 'school']
+    };
+    for (const [topic, keywords] of Object.entries(topicMap)) {
+      if (keywords.some(kw => allContent.includes(kw))) topics.push(topic);
+    }
     if (topics.length > 0) {
-      summary += `\nKey topics discussed: ${[...new Set(topics)].join(', ')}.`;
+      summary += `\nKey topics: ${[...new Set(topics)].join(', ')}.`;
     }
 
     return summary;
@@ -464,13 +473,39 @@ app.get('/api/models', (req, res) => {
   res.json(availableModels);
 });
 
-app.get('/api/characters', (req, res) => {
-  db.all("SELECT * FROM characters ORDER BY created_at DESC", (err, rows) => {
+app.get('/api/characters', async (req, res) => {
+  db.all("SELECT * FROM characters ORDER BY created_at DESC", async (err, rows) => {
     if (err) {
       res.status(500).json({ error: err.message });
       return;
     }
-    res.json(rows);
+    let results = rows || [];
+    if (mongodb.isConnected()) {
+      try {
+        const mongoChars = await mongodb.CharacterProfile.find().sort({ created_at: -1 }).lean();
+        const normalized = mongoChars.map(c => ({
+          id: c._id.toString(),
+          _v2: true,
+          name: c.name,
+          description: c.description,
+          personality: c.personality?.traits?.join(', ') || 'friendly and engaging',
+          greeting: c.greeting || '',
+          avatar_url: c.avatar_url || '',
+          lorebook: c.lorebook || '[]',
+          created_at: c.created_at,
+          personality_traits: c.personality,
+          dialogue: c.dialogue,
+          visual: c.visual,
+          relationships: c.relationships,
+          attributes: c.attributes,
+          output: c.output
+        }));
+        results = [...results, ...normalized];
+      } catch (e) {
+        console.error('MongoDB fetch error:', e.message);
+      }
+    }
+    res.json(results);
   });
 });
 
@@ -506,6 +541,110 @@ app.get('/api/characters/:id', (req, res) => {
     }
     res.json(row);
   });
+});
+
+// MongoDB character routes
+app.get('/api/v2/characters', async (req, res) => {
+  if (!mongodb.isConnected()) {
+    return res.json([]);
+  }
+  try {
+    const chars = await mongodb.CharacterProfile.find().sort({ created_at: -1 }).lean();
+    res.json(chars);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/v2/characters/:id', async (req, res) => {
+  if (!mongodb.isConnected()) {
+    return res.status(503).json({ error: 'MongoDB not connected' });
+  }
+  try {
+    const char = await mongodb.CharacterProfile.findById(req.params.id).lean();
+    if (!char) return res.status(404).json({ error: 'Character not found' });
+    res.json(char);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/v2/characters', async (req, res) => {
+  if (!mongodb.isConnected()) {
+    return res.status(503).json({ error: 'MongoDB not connected' });
+  }
+  try {
+    const { name, description, greeting, avatar_url, personality, dialogue, visual, relationships, attributes, output, lorebook } = req.body;
+    const profile = new mongodb.CharacterProfile({
+      name, description, greeting, avatar_url,
+      personality: {
+        traits: personality?.traits || [],
+        background: personality?.background || '',
+        archetype: personality?.archetype || 'custom'
+      },
+      dialogue: {
+        style: dialogue?.style || 'casual',
+        tone: dialogue?.tone || 'warm',
+        catchphrases: dialogue?.catchphrases || [],
+        speech_pattern: dialogue?.speech_pattern || ''
+      },
+      visual: {
+        art_style: visual?.art_style || '',
+        color_palette: visual?.color_palette || [],
+        mood: visual?.mood || '',
+        custom_params: visual?.custom_params || {}
+      },
+      relationships: relationships || [],
+      attributes: {
+        intelligence: attributes?.intelligence ?? 50,
+        empathy: attributes?.empathy ?? 50,
+        humor: attributes?.humor ?? 50,
+        creativity: attributes?.creativity ?? 50,
+        wisdom: attributes?.wisdom ?? 50,
+        charisma: attributes?.charisma ?? 50
+      },
+      output: {
+        size: output?.size || 'medium',
+        custom_width: output?.custom_width || null,
+        custom_height: output?.custom_height || null,
+        max_tokens: output?.max_tokens || 500,
+        temperature: output?.temperature ?? 0.8
+      },
+      lorebook: JSON.stringify(lorebook || []),
+      metadata_only: true
+    });
+    await profile.save();
+    res.json(profile.toObject());
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.put('/api/v2/characters/:id', async (req, res) => {
+  if (!mongodb.isConnected()) {
+    return res.status(503).json({ error: 'MongoDB not connected' });
+  }
+  try {
+    const updates = req.body;
+    updates.updated_at = new Date();
+    const char = await mongodb.CharacterProfile.findByIdAndUpdate(req.params.id, updates, { new: true }).lean();
+    if (!char) return res.status(404).json({ error: 'Character not found' });
+    res.json(char);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/api/v2/characters/:id', async (req, res) => {
+  if (!mongodb.isConnected()) {
+    return res.status(503).json({ error: 'MongoDB not connected' });
+  }
+  try {
+    await mongodb.CharacterProfile.findByIdAndDelete(req.params.id);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.put('/api/conversations/:id/model', (req, res) => {
@@ -669,6 +808,9 @@ io.on('connection', (socket) => {
             const emitResponse = (id) => {
               memoryStore.store(id, socket.id, characterId, 'user', message);
               memoryStore.store(id, socket.id, characterId, 'assistant', finalResponse);
+              if (finalSummary) {
+                memoryStore.store(id, socket.id, characterId, 'summary', finalSummary);
+              }
               socket.emit('ai-response', {
                 message: finalResponse,
                 conversationId: id,
@@ -740,6 +882,7 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
+server.listen(PORT, async () => {
+  await mongodb.connect();
   console.log(`Server running on port ${PORT}`);
 });
