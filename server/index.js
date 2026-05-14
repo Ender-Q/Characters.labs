@@ -74,16 +74,6 @@ const MODELS = {
     context: 131072,
     features: ['intelligent', 'reasoning', 'powerful'],
     icon: '🔥'
-  },
-  recheck: {
-    name: 'ReCheck',
-    description: 'Llama Prompt Guard 2 86M - Content Safety & Moderation',
-    model: process.env.AI_MODEL_SAFETY || 'meta-llama/llama-prompt-guard-2-86m',
-    provider: 'groq',
-    apiUrl: process.env.GROQ_API_URL || 'https://api.groq.com/openai/v1',
-    context: 128000,
-    features: ['safety', 'moderation', 'content-filter'],
-    icon: '🛡️'
   }
 };
 
@@ -95,7 +85,6 @@ app.use(express.json());
 const sqlite3 = require('sqlite3').verbose();
 const db = new sqlite3.Database(process.env.DB_PATH || './database.sqlite');
 
-// Initialize database tables
 db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS characters (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -121,90 +110,261 @@ db.serialize(() => {
     FOREIGN KEY (character_id) REFERENCES characters (id)
   )`);
 
-  // Add summary column if it doesn't exist (for existing databases)
   db.run(`ALTER TABLE conversations ADD COLUMN summary TEXT DEFAULT ''`, (err) => {
     if (err && !err.message.includes('duplicate column') && !err.message.includes('already exists')) {
       console.error('Error adding summary column:', err);
     }
   });
+
+  db.run(`CREATE TABLE IF NOT EXISTS memory_embeddings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id INTEGER,
+    user_id TEXT,
+    character_id INTEGER,
+    role TEXT,
+    content TEXT,
+    embedding TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
 });
 
-class AIService {
-  static checkContent(message) {
-    const harmfulKeywords = [
-      'kill', 'murder', 'rape', 'sexual assault', 'pedophile', 'child porn',
-      'extremist', 'terrorist', 'bomb making', 'weaponize', 'bioweapon',
-      'self harm', 'suicide', 'eating disorder', 'self-harm',
-      'stalk', 'harass', 'bully', 'cyberbullying',
-      'fraud', 'scam', 'phishing', 'illegal',
-      '18+', 'nsfw', 'explicit sexual', 'nude'
-    ];
-    
-    const lowerMessage = message.toLowerCase();
-    for (const keyword of harmfulKeywords) {
-      if (lowerMessage.includes(keyword)) {
-        return { safe: false, category: keyword };
+// ===== Toxicity Filter =====
+class ToxicityFilter {
+  static THRESHOLD = 0.00047025534488260746;
+
+  static CATEGORIES = [
+    {
+      name: 'severe_toxicity',
+      patterns: [
+        'kill yourself', 'go die', 'kill you', 'i will kill', 'wanna die', 'should die',
+        'end yourself', 'commit suicide', 'cut yourself', 'hurt yourself', 'self-harm',
+        'child porn', 'sexual assault', 'rape', 'pedophile', 'molest',
+        'terrorist', 'bomb making', 'bioweapon', 'nazi', 'white supremacy',
+        'torture', 'murder', 'massacre', 'execution'
+      ]
+    },
+    {
+      name: 'toxicity',
+      patterns: [
+        'fuck', 'shit', 'bitch', 'asshole', 'bastard', 'piss off', 'suck my',
+        'dick', 'cunt', 'whore', 'slut', 'prick', 'douche', 'motherfucker',
+        'damn you', 'go to hell', 'screw you', 'shut the fuck', 'fucking'
+      ]
+    },
+    {
+      name: 'identity_attack',
+      patterns: [
+        'faggot', 'retard', 'tranny', 'chink', 'spic', 'nigger', 'nigga',
+        'kike', 'raghead', 'camel jockey', 'sand nigger', 'wetback',
+        'gook', 'slant-eye', 'beaner', 'white trash', 'trailer trash'
+      ]
+    },
+    {
+      name: 'insult',
+      patterns: [
+        'stupid', 'idiot', 'moron', 'loser', 'dumbass', 'dumb ass',
+        'jerk', 'ass', 'pathetic', 'worthless', 'trash', 'garbage',
+        'scumbag', 'lowlife', 'piece of shit', 'you suck', 'suck balls'
+      ]
+    },
+    {
+      name: 'threat',
+      patterns: [
+        'i will find you', 'i know where you live', 'going to kill',
+        'going to hurt', 'beat you', 'beat the', 'shoot you', 'stab you',
+        'strangle', 'choke you', 'punch you', 'slit your', 'break your'
+      ]
+    },
+    {
+      name: 'profanity',
+      patterns: [
+        'goddamn', 'goddam', 'son of a bitch', 'bullshit', 'horseshit',
+        'crap', 'damn', 'hell', 'ass', 'piss', 'cock', 'balls',
+        'tits', 'boobs', 'porn', 'nsfw', '18+'
+      ]
+    },
+    {
+      name: 'harassment',
+      patterns: [
+        'ugly', 'fat', 'disgusting', 'creep', 'weirdo', 'freak',
+        'nobody likes you', 'no one loves you', 'you should be alone',
+        'shut up', 'nobody asked', 'no one cares'
+      ]
+    }
+  ];
+
+  static check(text) {
+    const lowerText = text.toLowerCase();
+    let maxScore = 0;
+    let matchedCategory = null;
+    let matchedPattern = null;
+
+    for (const category of this.CATEGORIES) {
+      for (const pattern of category.patterns) {
+        if (lowerText.includes(pattern)) {
+          const score = 0.001;
+          if (score > maxScore) {
+            maxScore = score;
+            matchedCategory = category.name;
+            matchedPattern = pattern;
+          }
+        }
       }
     }
-    return { safe: true };
+
+    return {
+      score: maxScore,
+      blocked: maxScore > this.THRESHOLD,
+      category: matchedCategory,
+      pattern: matchedPattern
+    };
+  }
+}
+
+// ===== Memory Store (Vector-Based) =====
+class MemoryStore {
+  constructor(database) {
+    this.db = database;
   }
 
-  static async generateSummary(conversationHistory) {
-    // For now, we'll create a simple summary based on recent messages
-    // In a production app, you might want to use an AI model to generate better summaries
-    if (conversationHistory.length === 0) return '';
-    
-    // Take the last few messages to create a summary
-    const recentMessages = conversationHistory.slice(-10);
-    let summary = 'Recent conversation topics: ';
-    
-    // Extract key topics (simplified)
-    const topics = [];
-    recentMessages.forEach(msg => {
-      const content = msg.content.toLowerCase();
-      // Simple keyword extraction
-      if (content.includes('love') || content.includes('like') || content.includes('enjoy')) topics.push('positive emotions');
-      if (content.includes('hate') || content.includes('dislike') || content.includes('angry')) topics.push('negative emotions');
-      if (content.includes('work') || content.includes('job') || content.includes('career')) topics.push('work/career');
-      if (content.includes('family') || content.includes('friend') || content.includes('relationship')) topics.push('relationships');
-      if (content.includes('hobby') || content.includes('game') || content.includes('fun')) topics.push('hobbies/interests');
+  async _getGoogleEmbedding(text) {
+    const apiKey = process.env.GOOGLE_API_KEY;
+    if (!apiKey) return null;
+
+    const baseUrl = process.env.GOOGLE_API_URL || 'https://generativelanguage.googleapis.com/v1beta';
+    try {
+      const response = await fetch(`${baseUrl}/models/embedding-001:embedContent?key=${apiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'models/embedding-001',
+          content: { parts: [{ text: text.slice(0, 2000) }] }
+        })
+      });
+      if (!response.ok) return null;
+      const data = await response.json();
+      return data.embedding?.values || null;
+    } catch {
+      return null;
+    }
+  }
+
+  cosineSimilarity(a, b) {
+    let dot = 0, magA = 0, magB = 0;
+    for (let i = 0; i < a.length; i++) {
+      dot += a[i] * b[i];
+      magA += a[i] * a[i];
+      magB += b[i] * b[i];
+    }
+    const denom = Math.sqrt(magA) * Math.sqrt(magB);
+    return denom === 0 ? 0 : dot / denom;
+  }
+
+  async store(conversationId, userId, characterId, role, content) {
+    const embedding = await this._getGoogleEmbedding(content);
+    if (!embedding) return;
+
+    this.db.run(
+      `INSERT INTO memory_embeddings (conversation_id, user_id, character_id, role, content, embedding)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [conversationId, userId, characterId, role, content.slice(0, 1000), JSON.stringify(embedding)]
+    );
+  }
+
+  async retrieve(query, userId, characterId, topK = 5) {
+    const queryEmb = await this._getGoogleEmbedding(query);
+    if (!queryEmb) return [];
+
+    const rows = await new Promise((resolve, reject) => {
+      this.db.all(
+        `SELECT * FROM memory_embeddings WHERE user_id = ? AND character_id = ? ORDER BY created_at DESC LIMIT 200`,
+        [userId, characterId],
+        (err, rows) => { if (err) reject(err); else resolve(rows); }
+      );
     });
-    
-    // Deduplicate and limit topics
-    const uniqueTopics = [...new Set(topics)].slice(0, 3);
-    summary += uniqueTopics.join(', ');
-    
+
+    const scored = rows
+      .map(row => ({
+        content: row.content,
+        role: row.role,
+        similarity: this.cosineSimilarity(queryEmb, JSON.parse(row.embedding))
+      }))
+      .filter(r => r.similarity > 0.45);
+
+    scored.sort((a, b) => b.similarity - a.similarity);
+    return scored.slice(0, topK);
+  }
+
+  async generateComprehensiveSummary(conversationId) {
+    const row = await new Promise((resolve, reject) => {
+      this.db.get(
+        `SELECT messages, model_type FROM conversations WHERE id = ?`,
+        [conversationId],
+        (err, row) => { if (err) reject(err); else resolve(row); }
+      );
+    });
+
+    if (!row) return '';
+
+    const messages = JSON.parse(row.messages || '[]');
+    if (messages.length === 0) return '';
+
+    let summary = `Conversation using ${MODELS[row.model_type]?.name || 'Unknown'} model:\n`;
+    messages.slice(-20).forEach(msg => {
+      const prefix = msg.role === 'user' ? 'User' : 'Character';
+      summary += `${prefix}: ${msg.content.slice(0, 200)}\n`;
+    });
+
+    const topics = [];
+    const allContent = messages.map(m => m.content.toLowerCase()).join(' ');
+    if (allContent.includes('love') || allContent.includes('like') || allContent.includes('enjoy')) topics.push('positive emotions');
+    if (allContent.includes('hate') || allContent.includes('angry') || allContent.includes('sad')) topics.push('negative emotions');
+    if (allContent.includes('work') || allContent.includes('job') || allContent.includes('career')) topics.push('work/career');
+    if (allContent.includes('family') || allContent.includes('friend') || allContent.includes('relationship')) topics.push('relationships');
+    if (allContent.includes('hobby') || allContent.includes('game') || allContent.includes('fun')) topics.push('hobbies/interests');
+
+    if (topics.length > 0) {
+      summary += `\nKey topics discussed: ${[...new Set(topics)].join(', ')}.`;
+    }
+
     return summary;
   }
+}
 
-  static async generateResponse(character, message, conversationHistory, modelType = 'softlaunch', summary = '') {
-    const contentCheck = this.checkContent(message);
-    if (!contentCheck.safe) {
+const memoryStore = new MemoryStore(db);
+
+// ===== AI Service =====
+class AIService {
+  static async generateResponse(character, message, conversationHistory, modelType = 'softlaunch', memories = []) {
+    const modelConfig = MODELS[modelType] || MODELS.softlaunch;
+    const apiKey = modelConfig.provider === 'google'
+      ? process.env.GOOGLE_API_KEY
+      : process.env.GROQ_API_KEY;
+
+    if (!apiKey) {
       return {
-        content: "I'm sorry, but I can't engage with content related to " + contentCheck.category + ". Let's talk about something else!",
-        model: MODELS[modelType].name,
-        blocked: true
+        content: "Service not configured. Please set API keys in environment variables.",
+        model: modelConfig.name
       };
     }
 
-    const modelConfig = MODELS[modelType] || MODELS.softlaunch;
-    const apiKey = modelConfig.provider === 'google' 
-      ? process.env.GOOGLE_API_KEY 
-      : process.env.GROQ_API_KEY;
-    
     let apiUrl = modelConfig.apiUrl;
     let body, headers;
+
+    const memoryContext = memories.length > 0
+      ? '\n\nRelevant past memories:\n' + memories.map(m => `- ${m.role === 'user' ? 'User' : m.role === 'assistant' ? 'Character' : 'System'} said: "${m.content.slice(0, 300)}"`).join('\n')
+      : '';
 
     if (modelConfig.provider === 'google') {
       apiUrl = `${apiUrl}/models/${modelConfig.model}:generateContent?key=${apiKey}`;
       headers = { 'Content-Type': 'application/json' };
-      
-       const allMessages = [
-         { role: 'user', parts: [{ text: 'System: ' + 'You are ' + character.name + '. ' + character.description + '\n\nPersonality: ' + character.personality + '\n\nIMPORTANT: Stay in character, never mention being AI, never break character.' + (summary ? '\n\nSummary of past conversations: ' + summary : '') }] },
-         ...conversationHistory.slice(-20).map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] })),
-         { role: 'user', parts: [{ text: message }] }
-       ];
-      
+
+      const allMessages = [
+        { role: 'user', parts: [{ text: 'System: ' + 'You are ' + character.name + '. ' + character.description + '\n\nPersonality: ' + character.personality + '\n\nIMPORTANT: Stay in character, never mention being AI, never break character.' + memoryContext }] },
+        ...conversationHistory.slice(-20).map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] })),
+        { role: 'user', parts: [{ text: message }] }
+      ];
+
       body = JSON.stringify({
         contents: allMessages,
         generationConfig: {
@@ -215,17 +375,17 @@ class AIService {
       });
     } else {
       apiUrl = `${apiUrl}/chat/completions`;
-      
+
       const lorebook = character.lorebook ? JSON.parse(character.lorebook) : [];
-      const loreContext = lorebook.length > 0 
+      const loreContext = lorebook.length > 0
         ? `\n\nLOREBOOK: ${lorebook.map(entry => `${entry.key}: ${entry.value}`).join('\n')}`
         : '';
 
-       const systemPrompt = `You are ${character.name}. ${character.description}${loreContext}
- Personality: ${character.personality}
- IMPORTANT: Stay in character, never mention being AI, never break character.
- Greeting: ${character.greeting}
- Summary of past conversations: ${summary}`;
+      const systemPrompt = `You are ${character.name}. ${character.description}${loreContext}
+Personality: ${character.personality}
+IMPORTANT: Stay in character, never mention being AI, never break character.
+Greeting: ${character.greeting}
+${memoryContext}`;
 
       const messages = [
         { role: "system", content: systemPrompt },
@@ -237,7 +397,7 @@ class AIService {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`
       };
-      
+
       body = JSON.stringify({
         model: modelConfig.model,
         messages: messages,
@@ -247,7 +407,7 @@ class AIService {
       });
     }
 
-try {
+    try {
       const rawResponse = await fetch(apiUrl, {
         method: 'POST',
         headers: headers,
@@ -255,7 +415,7 @@ try {
       });
 
       const rawText = await rawResponse.text();
-      
+
       if (!rawResponse.ok) {
         console.error(`API Error (${rawResponse.status}):`, rawText);
         throw new Error(`API Error ${rawResponse.status}: ${rawText.substring(0, 200)}`);
@@ -275,7 +435,7 @@ try {
       } else {
         content = data.choices[0].message.content;
       }
-      
+
       return {
         content: content,
         model: modelConfig.name
@@ -316,9 +476,9 @@ app.get('/api/characters', (req, res) => {
 app.post('/api/characters', (req, res) => {
   const { name, description, personality, greeting, avatar_url, lorebook } = req.body;
   const lorebookJson = JSON.stringify(lorebook || []);
-  
+
   db.run(
-    `INSERT INTO characters (name, description, personality, greeting, avatar_url, lorebook) 
+    `INSERT INTO characters (name, description, personality, greeting, avatar_url, lorebook)
      VALUES (?, ?, ?, ?, ?, ?)`,
     [name, description, personality, greeting, avatar_url, lorebookJson],
     function(err) {
@@ -333,7 +493,7 @@ app.post('/api/characters', (req, res) => {
 
 app.get('/api/characters/:id', (req, res) => {
   const { id } = req.params;
-  
+
   db.get("SELECT * FROM characters WHERE id = ?", [id], (err, row) => {
     if (err) {
       res.status(500).json({ error: err.message });
@@ -350,7 +510,7 @@ app.get('/api/characters/:id', (req, res) => {
 app.put('/api/conversations/:id/model', (req, res) => {
   const { id } = req.params;
   const { modelType } = req.body;
-  
+
   if (!MODELS[modelType]) {
     res.status(400).json({ error: 'Invalid model type' });
     return;
@@ -371,7 +531,7 @@ app.put('/api/conversations/:id/model', (req, res) => {
 
 app.get('/api/conversations/:characterId/:userId', (req, res) => {
   const { characterId, userId } = req.params;
-  
+
   db.all(
     "SELECT * FROM conversations WHERE character_id = ? AND user_id = ? ORDER BY created_at DESC LIMIT 10",
     [characterId, userId],
@@ -407,20 +567,20 @@ class SoftLaunchLayer {
   analyzeEmotion(message) {
     const intenseKeywords = ['love', 'hate', 'miss', 'need', 'always', 'forever', 'never', 'die', 'kill', 'alone', 'destroy'];
     const moderateKeywords = ['feel', 'think', 'want', 'hope', 'wish', 'sad', 'happy', 'angry', 'scared'];
-    
+
     let score = 0;
     const lowerMsg = message.toLowerCase();
-    
+
     intenseKeywords.forEach(kw => { if (lowerMsg.includes(kw)) score += 0.15; });
     moderateKeywords.forEach(kw => { if (lowerMsg.includes(kw)) score += 0.05; });
-    
+
     return Math.min(score, 1);
   }
 
   checkEscalation(message) {
     this.messageCount++;
     this.emotionalIntensity = this.analyzeEmotion(message);
-    
+
     if (this.messageCount >= 8 && this.emotionalIntensity > 0.7) {
       return this.intervene();
     }
@@ -459,7 +619,17 @@ io.on('connection', (socket) => {
 
   socket.on('send-message', async (data) => {
     const { characterId, message, conversationId, modelType = 'softlaunch' } = data;
-    
+
+    const toxicityCheck = ToxicityFilter.check(message);
+    if (toxicityCheck.blocked) {
+      socket.emit('ai-response', {
+        message: "I'm sorry, but I can't respond to that.",
+        conversationId,
+        blocked: true
+      });
+      return;
+    }
+
     try {
       db.get("SELECT * FROM characters WHERE id = ?", [characterId], async (err, character) => {
         if (err || !character) {
@@ -468,42 +638,43 @@ io.on('connection', (socket) => {
         }
 
         db.get(
-          "SELECT * FROM conversations WHERE id = ?", 
-          [conversationId], 
+          "SELECT * FROM conversations WHERE id = ?",
+          [conversationId],
           async (err, conversation) => {
             const history = conversation ? JSON.parse(conversation.messages || '[]') : [];
             const session = getUserSession(`${socket.id}-${characterId}`);
             const intervention = session.checkEscalation(message);
-            
+
+            const memories = await memoryStore.retrieve(message, socket.id, characterId);
+
             let finalResponse;
             if (intervention) {
               finalResponse = intervention.message;
             } else {
-              // Pass conversation history and existing summary to generateResponse
-              const aiResult = await AIService.generateResponse(character, message, history, modelType, conversation ? (conversation.summary || '') : '');
+              const aiResult = await AIService.generateResponse(character, message, history, modelType, memories);
               finalResponse = aiResult.content;
             }
-            
+
             const newHistory = [
               ...history,
               { role: "user", content: message, timestamp: new Date().toISOString() },
               { role: "assistant", content: finalResponse, timestamp: new Date().toISOString(), model: MODELS[modelType]?.name || 'Soft Launch' }
             ];
 
-            // Generate summary for permanent memory
-            const summary = await AIService.generateSummary(newHistory);
-
             let newConversationId = conversationId;
-            
+
+            const summary = await memoryStore.generateComprehensiveSummary(conversationId || 0);
+            const finalSummary = summary || '';
+
             if (conversationId) {
               db.run(
                 "UPDATE conversations SET messages = ?, message_count = ?, summary = ? WHERE id = ?",
-                [JSON.stringify(newHistory), newHistory.length, summary, conversationId]
+                [JSON.stringify(newHistory), newHistory.length, finalSummary, conversationId]
               );
             } else {
               db.run(
                 "INSERT INTO conversations (character_id, user_id, messages, model_type, message_count, summary) VALUES (?, ?, ?, ?, ?, ?)",
-                [characterId, socket.id, JSON.stringify(newHistory), modelType, newHistory.length, summary],
+                [characterId, socket.id, JSON.stringify(newHistory), modelType, newHistory.length, finalSummary],
                 function(err) {
                   if (!err) {
                     newConversationId = this.lastID;
@@ -511,6 +682,9 @@ io.on('connection', (socket) => {
                 }
               );
             }
+
+            memoryStore.store(newConversationId, socket.id, characterId, 'user', message);
+            memoryStore.store(newConversationId, socket.id, characterId, 'assistant', finalResponse);
 
             socket.emit('ai-response', {
               message: finalResponse,
@@ -525,10 +699,15 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('switch-model', (data) => {
+  socket.on('switch-model', async (data) => {
     const { conversationId, modelType } = data;
     if (MODELS[modelType]) {
       db.run("UPDATE conversations SET model_type = ? WHERE id = ?", [modelType, conversationId]);
+
+      const summary = await memoryStore.generateComprehensiveSummary(conversationId);
+      if (summary) {
+        db.run("UPDATE conversations SET summary = ? WHERE id = ?", [summary, conversationId]);
+      }
     }
   });
 
