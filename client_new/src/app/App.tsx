@@ -18,13 +18,20 @@ const MODELS = {
 };
 
 interface Character {
-  id: number;
+  id: number | string;
   name: string;
   description: string;
   personality?: string;
   greeting?: string;
   avatar_url?: string;
   lorebook?: string;
+  _v2?: boolean;
+  personality_traits?: { traits?: string[]; background?: string; archetype?: string };
+  dialogue?: { style?: string; tone?: string; catchphrases?: string[]; speech_pattern?: string };
+  visual?: { art_style?: string; color_palette?: string[]; mood?: string; custom_params?: any };
+  relationships?: Array<{ target_name: string; type: string; description?: string }>;
+  attributes?: { intelligence?: number; empathy?: number; humor?: number; creativity?: number; wisdom?: number; charisma?: number };
+  output?: { size?: string; custom_width?: number; custom_height?: number; max_tokens?: number; temperature?: number };
 }
 
 export default function App() {
@@ -194,9 +201,25 @@ export default function App() {
     }
   }, [messages, selectedCharacter, conversationId, currentModel, saveToRewind]);
 
-  const onCharacterCreated = (char: Character) => {
-    setCharacters(prev => [char, ...prev]);
-    handleCharacterSelect(char);
+  const onCharacterCreated = (char: any) => {
+    const flat: Character = {
+      id: char.id,
+      _v2: true,
+      name: char.name,
+      description: char.description,
+      personality: char.personality || 'friendly and engaging',
+      greeting: char.greeting,
+      avatar_url: char.avatar_url,
+      lorebook: '[]',
+      personality_traits: char.personality_traits,
+      dialogue: char.dialogue,
+      visual: char.visual,
+      relationships: char.relationships,
+      attributes: char.attributes,
+      output: char.output
+    };
+    setCharacters(prev => [flat, ...prev]);
+    handleCharacterSelect(flat);
   };
 
   const handleNewChat = () => {

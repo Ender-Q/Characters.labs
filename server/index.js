@@ -366,12 +366,21 @@ class AIService {
       : '';
     const fullContext = summaryContext + memoryContext;
 
+    const personalityTraits = character.personality_traits;
+    const backstoryContext = personalityTraits?.background
+      ? `\n\nBackstory: ${personalityTraits.background}`
+      : '';
+    const dialogueContext = character.dialogue
+      ? `\nDialogue style: ${character.dialogue.style || 'casual'} | Tone: ${character.dialogue.tone || 'warm'}${character.dialogue.catchphrases?.length ? '\nCatchphrases: ' + character.dialogue.catchphrases.join(', ') : ''}${character.dialogue.speech_pattern ? '\nSpeech pattern: ' + character.dialogue.speech_pattern : ''}`
+      : '';
+    const charContext = backstoryContext + dialogueContext;
+
     if (modelConfig.provider === 'google') {
       apiUrl = `${apiUrl}/models/${modelConfig.model}:generateContent?key=${apiKey}`;
       headers = { 'Content-Type': 'application/json' };
 
       const allMessages = [
-        { role: 'user', parts: [{ text: 'System: ' + 'You are ' + character.name + '. ' + character.description + '\n\nPersonality: ' + character.personality + '\n\nIMPORTANT: Stay in character, never mention being AI, never break character.' + fullContext }] },
+        { role: 'user', parts: [{ text: 'System: ' + 'You are ' + character.name + '. ' + character.description + charContext + '\n\nPersonality: ' + character.personality + '\n\nIMPORTANT: Stay in character, never mention being AI, never break character.' + fullContext }] },
         ...conversationHistory.slice(-20).map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] })),
         { role: 'user', parts: [{ text: message }] }
       ];
@@ -392,7 +401,7 @@ class AIService {
         ? `\n\nLOREBOOK: ${lorebook.map(entry => `${entry.key}: ${entry.value}`).join('\n')}`
         : '';
 
-      const systemPrompt = `You are ${character.name}. ${character.description}${loreContext}
+      const systemPrompt = `You are ${character.name}. ${character.description}${loreContext}${charContext}
 Personality: ${character.personality}
 IMPORTANT: Stay in character, never mention being AI, never break character.
 Greeting: ${character.greeting}${fullContext}`;
@@ -773,8 +782,33 @@ io.on('connection', (socket) => {
     try {
       db.get("SELECT * FROM characters WHERE id = ?", [characterId], async (err, character) => {
         if (err || !character) {
-          socket.emit('error', { message: 'Character not found' });
-          return;
+          if (mongodb.isConnected()) {
+            try {
+              const mongoChar = await mongodb.CharacterProfile.findById(characterId).lean();
+              if (mongoChar) {
+                character = {
+                  id: mongoChar._id.toString(),
+                  _v2: true,
+                  name: mongoChar.name,
+                  description: mongoChar.description,
+                  personality: mongoChar.personality?.traits?.join(', ') || 'friendly and engaging',
+                  greeting: mongoChar.greeting || '',
+                  avatar_url: mongoChar.avatar_url || '',
+                  lorebook: mongoChar.lorebook || '[]',
+                  personality_traits: mongoChar.personality,
+                  dialogue: mongoChar.dialogue,
+                  visual: mongoChar.visual,
+                  relationships: mongoChar.relationships,
+                  attributes: mongoChar.attributes,
+                  output: mongoChar.output
+                };
+              }
+            } catch {}
+          }
+          if (!character) {
+            socket.emit('error', { message: 'Character not found' });
+            return;
+          }
         }
 
         db.get(

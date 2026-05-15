@@ -84,16 +84,17 @@ const characterProfileSchema = new mongoose.Schema({
   updated_at: { type: Date, default: Date.now }
 });
 
-characterProfileSchema.pre('save', function(next) {
+characterProfileSchema.pre('save', function() {
   this.updated_at = new Date();
-  if (this.isModified()) {
+  if (this.isModified('name') || this.isModified('description') || this.isModified('personality') || this.isModified('dialogue')) {
+    const obj = this.toObject();
     this.version_history.push({
       version: this.version,
-      data: this.toObject()
+      data: { name: obj.name, description: obj.description, personality: obj.personality, dialogue: obj.dialogue },
+      timestamp: new Date()
     });
     this.version += 1;
   }
-  next();
 });
 
 const CharacterProfile = mongoose.model('CharacterProfile', characterProfileSchema);

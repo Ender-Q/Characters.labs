@@ -109,7 +109,12 @@ export function CharacterCreator({ onClose, onCreated }: { onClose: () => void; 
           greeting: char.greeting,
           avatar_url: char.avatar_url,
           lorebook: '[]',
-          output: char.output
+          output: char.output,
+          personality_traits: char.personality,
+          dialogue: char.dialogue,
+          visual: char.visual,
+          relationships: char.relationships,
+          attributes: char.attributes
         });
         onClose();
       } else {
